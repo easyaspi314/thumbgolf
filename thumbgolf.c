@@ -557,6 +557,7 @@ static void sighandler(int signo, siginfo_t *si, void *data)
         // I honestly don't know why this was optional in ARMv7-A. ¯\_(ツ)_/¯
         // sdiv: FB9x xxFx
         // udiv: FBBx xxFx
+        // TODO: IT blocks
         }  else if ((insn & 0xFFD0) == 0xFB90) {
               u32 insn2 = ((const uint16_t *)(uc->uc_mcontext.arm_pc&~1))[1];
               if ((insn2 & 0x00F0) == 0x00F0) {

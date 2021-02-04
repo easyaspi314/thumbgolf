@@ -55,7 +55,7 @@ QEMU. I may lower this requirement in the future.
  - [x] Narrow instructions for unsigned division, multiplication, and modulo by 10
  - [ ] Wide instructions
    - [x] **Guaranteed availibility** of `sdiv` and `udiv` even if it isn't
-available on the target device
+available on the target device†
    - [x] A proper divmod (no more subtraction loops or `mls`! 🎉)
    - [x] Min and max
    - [ ] Wide versions of the narrow instructions
@@ -68,8 +68,11 @@ available on the target device
    - [ ] `ldr` expands to `movs` for small constants
    - [ ] Allowing explicit width specifiers for all instructions
    - [ ] Better warnings
-   - [ ] Possibly figure out IT blocks
  - [ ] And more (I haven't decided yet).
+
+Note that ThumbGolf does **not** support IT blocks (yet). This also includes
+`sdiv` and `udiv` emulation. `thumbgolf.inc` will cause predicated `udiv` and
+`sdiv` instructions to error until/if it is ever fixed.
 
 ## Examples
 

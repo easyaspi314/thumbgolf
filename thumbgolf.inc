@@ -110,6 +110,8 @@
 	.endif
 .endm
 
+
+
 // placeholder for movs Rd, -1
 .macro movs.n1 Rd:req; _tg_udf.n 012, _tg_reg_arg_\Rd; .endm
 .macro mvns.0 Rd:req;  _tg_udf.n 012, _tg_reg_arg_\Rd; .endm
@@ -165,3 +167,14 @@
 	_tg_wide_4op	001, _tg_reg_arg_\Rd, _tg_reg_arg_sp, (\imm8 >> 4), (\imm8 & 0xf)
 .endm
 
+// Block the user from using sdiv and udiv in IT blocks. While it works on
+// hardware, our emulation will not.
+// TODO: fix this.
+.irp cond, eq, ne, cs, hs, cc, lo, mi, pl, vs, vc, hi, ls, ge, lt, gt, le, al
+.macro	udiv\cond x, y, z
+	.error "udiv emulation is not currently allowed in IT blocks!"
+.endm
+.macro	sdiv\cond x, y, z
+	.error "sdiv emulation is not currently allowed in IT blocks!"
+.endm
+.endr

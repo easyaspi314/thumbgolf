@@ -87,6 +87,7 @@ typedef long s32;
 
 _Static_assert(offsetof(struct sigcontext, arm_cpsr) - offsetof(struct sigcontext, arm_r0) == 64, "bad siginfo_t");
 
+// Rethrow SIGILL. We must disable our signal handlers first.
 _Noreturn static void illegal(void)
 {
     signal(SIGILL, SIG_DFL);
@@ -317,7 +318,7 @@ static void is_bad_reg(u32 regno)
 }
 
 // Unsigned arithmetic
-// 000 aaaabbbbccccdddd
+// 000000 aaaabbbbccccdddd
 // if a == SP
 //    regs[b] %= cd
 // else if a == PC
@@ -369,7 +370,7 @@ static void decode_wide_000(u32 *regs, u32 insn)
 }
 
 // Signed arithmetic, otherwise identical to the unsigned one
-// 001 aaaabbbbccccdddd
+// 000001 aaaabbbbccccdddd
 // if a == SP
 //    regs[b] %= cd
 // else if a == PC
@@ -424,14 +425,17 @@ static void decode_wide_001(u32 *regs, u32 insn)
 // it is used to encode other instructions.
 //
 // Note that not all instructions are in the X, Y, Z format. See udiv Rd, #imm.
-// This is because we only have ~19 bits (compared to Thumb-2's ~28 bits).
+// This is because we only have ~21 bits (compared to Thumb-2's ~28 bits).
 //
 // I would rather have some instructions be dyadic than limit ALL instructions
 // to Lo registers or give up functionality.
+//
+// Classes are in octal, instruction data is not.
 static void decode_wide_insn(u32 *regs, u32 insn)
 {
-    // We have 34 wide insn classes. That is because the swap register insn
-    // is commutative, so we can just make sure that it is sorted.
+    // We have 34 wide insn classes. That is because the swap register
+    // instruction is commutative, so we encode it as 03XY where X > Y. If
+    // X <= Y, it is a wide instruction
     switch ((insn >> 16) & 077) {
         case 000: decode_wide_000(regs, insn); break;
         case 001: decode_wide_001(regs, insn); break;
@@ -553,13 +557,12 @@ static void sighandler(int signo, siginfo_t *si, void *data)
         // I honestly don't know why this was optional in ARMv7-A. ¯\_(ツ)_/¯
         // sdiv: FB9x xxFx
         // udiv: FBBx xxFx
-        // XXX: is this mask correct?
-        }  else if ((insn & 0xFF90) == 0xFB90) {
+        }  else if ((insn & 0xFFD0) == 0xFB90) {
               u32 insn2 = ((const uint16_t *)(uc->uc_mcontext.arm_pc&~1))[1];
               if ((insn2 & 0x00F0) == 0x00F0) {
                   // To be ABSOLUTELY safe, forcibly call libgcc.
                   // The last thing we want is an infinite loop.
-                  if (insn & 0x0040) { // udiv
+                  if (insn & 0x0020) { // udiv
                       extern unsigned __aeabi_uidiv(unsigned num, unsigned dem);
                       u32 Rn = regs[insn & 0xF];
                       u32 Rm = regs[insn2 & 0xF];
@@ -575,8 +578,12 @@ static void sighandler(int signo, siginfo_t *si, void *data)
               } else {
                   illegal();
               }
+        } else {
+            illegal();
         }
-        // TODO: udf.w? That is 12 true bits
+        // TODO: udf.w? That is only 12 real bits, while udf.n followed by an
+        // arbitrary halfword is MUCH better.
+        // If we run out of instructions, I might consider it.
     } else {
         // Joking aside, there is no reason to golf with ARM instruction, and
         // our code expects the program to be in Thumb state.

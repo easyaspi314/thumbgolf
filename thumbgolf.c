@@ -125,17 +125,16 @@ static uint64_t get_int(void)
     return (u32)tmp | (ret << 32);
 }
 
-// Wide puti will probably have a flag for no newline and for hex/unsigned/octal.
+// Wide puti will probably have a flag for hex/unsigned/octal.
 static void put_int_n(int x)
 {
-    printf("%i\n", x);
+    printf("%i", x);
 }
 
-// Narrow puts is literally puts
-// Wide puts will have a flag for no newline
+// Narrow puts does NOT print a new line
 static void put_str_n(const char *str)
 {
-    puts(str);
+    printf("%s", str);
 }
 
 
@@ -611,5 +610,5 @@ void thumbgolf_inject(void)
     sa.sa_sigaction = sighandler;
     sigaction(SIGILL, &sa, &osa);
     sigaction(SIGTRAP, &sa, &osa);
-};
+}
 

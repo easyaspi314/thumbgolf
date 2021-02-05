@@ -134,7 +134,8 @@ static void put_int_n(int x)
 // Narrow puts does NOT print a new line
 static void put_str_n(const char *str)
 {
-    printf("%s", str);
+    if (str != NULL)
+        printf("%s", str);
 }
 
 

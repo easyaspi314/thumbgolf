@@ -176,6 +176,9 @@ static void put_char(int c)
 //
 // These include null byte, tab, newline, space, comma, curly brackets, and
 // double quote.
+//
+// This is designed to compensate for the narrow I/O functions not printing
+// separators.
 static const char special_chars[] = {
     '\0', '\t', '\n', ' ', ',', '{', '}', '"'
 };
@@ -208,7 +211,8 @@ struct io_callback
 
 // Basic I/O instructions, udf #00xx
 // These all require veneers since they call unsafe libc functions.
-// Wide versions are planned whic
+// Wide versions are planned which will accept all registers and add more
+// options.
 static const struct io_callback io_funcs[] = {
     { &put_str_n, MODE_VOID | MODE_OUTPUT_REG },  // puts   Rn
     { &get_str, MODE_REG_Z },                     // gets   Rd
@@ -528,8 +532,8 @@ static void sighandler(int signo, siginfo_t *si, void *data)
                     // The function of this instruction depends on if Rn is
                     // greater than Rm. If it is, it is a swap instruction.
                     // If it isn't, it is a wide instruction.
-                    int Rn = insn & 7;
-                    int Rm = (insn >> 3) & 7;
+                    int Rn = (insn >> 3) & 7;
+                    int Rm = insn & 7;
                     if (Rn > Rm) { // swap Rn, Rm
                         u32 tmp = regs[Rn];
                         regs[Rn] = regs[Rm];

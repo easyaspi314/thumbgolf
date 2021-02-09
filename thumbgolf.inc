@@ -130,6 +130,17 @@
 	.byte	(\label - (. + 4)) / 2, 0xbe
 .endm
 
+.macro swap Rn:req, Rm:req
+	.if _tg_reg_arg_\Rn+0 == _tg_reg_arg_\Rm+0
+		.error "No swapping with self"
+	.elseif _tg_reg_arg_\Rn+0 > 7 || _tg_reg_arg_\Rm+0 > 7 || _tg_reg_arg_\Rn+0 < 0 || _tg_reg_arg_\Rm+0 < 0
+		.error "Registers must be in the range [r0-r7]!"
+	.elseif _tg_reg_arg_\Rn+0 > _tg_reg_arg_\Rm+0
+		udf.n #0300 + (_tg_reg_arg_\Rn << 3) + (_tg_reg_arg_\Rm)
+	.else
+		udf.n #0300 + (_tg_reg_arg_\Rm << 3) + (_tg_reg_arg_\Rn)
+	.endif
+.endm
 // TODO: checking
 .macro _tg_wide_4op Opcode:req, a:req, b:req, c:req, d:req
 	udf.n	#0300 | (\Opcode & 077)

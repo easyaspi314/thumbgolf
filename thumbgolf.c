@@ -184,7 +184,7 @@ static const char special_chars[] = {
 };
 static void put_special(u32 insn)
 {
-    putchar(special_chars[insn & 7]);
+    put_char(special_chars[insn & 7]);
 }
 
 static uint64_t get_rand(void)
@@ -195,6 +195,27 @@ static uint64_t get_rand(void)
     fclose(f);
     uint64_t is_zero = ret == 0;
     return ret | (is_zero << 32);
+}
+
+// todo: use
+__attribute__((__naked__))
+static void save_vfp(double *vfpstate)
+{
+    __asm__(
+        "    vstmia r0!, {d0-d15}\n"
+        "    vstmia r0!, {d16-d31}\n"
+        "    bx     lr"
+    );
+}
+
+__attribute__((__naked__))
+static void restore_vfp(double *vfpstate)
+{
+    __asm__(
+        "    vldmia r0!, {d0-d15}\n"
+        "    vldmia r0!, {d16-d31}\n"
+        "    bx     lr"
+    );
 }
 
 #define MODE_VOID 0
@@ -324,11 +345,11 @@ static void is_bad_reg(u32 regno)
 // Unsigned arithmetic
 // 000000 aaaabbbbccccdddd
 // if a == SP
-//    regs[b] %= cd
+//    RESERVED
 // else if a == PC
 //    regs[b] = umax(regs[c], regs[d])
 // else if b == SP
-//    regs[a] /= cd
+//    RESERVED
 // else if b == PC
 //    regs[a] = umin(regs[c], regs[d])
 // else
@@ -341,25 +362,14 @@ static void decode_wide_000(u32 *regs, u32 insn)
     u32 Rn = (insn >> 4) & 0xF;
     u32 Rm = (insn >> 0) & 0xF;
 
-    if (Rd == REG_SP) { // umod Rd, #imm8
-        is_bad_reg(Rp);
-        u32 imm8 = insn & 0xFF;
-        if (imm8 == 0) {
-            die("umod with imm8 == 0 is reserved!\n");
-        }
-        regs[Rp] %= imm8;
-    } else if (Rd == REG_PC) { // umax Rd, Rn, Rm
+    if (Rd == REG_PC) { // umax Rd, Rn, Rm
         is_bad_reg(Rp);
         regs[Rp] = (regs[Rn] > regs[Rm]) ? regs[Rn] : regs[Rm];
-    } else if (Rp == REG_SP) { // udiv Rd, #imm8
-        u32 imm8 = insn & 0xFF;
-        if (imm8 == 0) {
-            die("udiv with imm8 == 0 is reserved!\n");
-        }
-        regs[Rd] /= imm8;
     } else if (Rp == REG_PC) { // umin Rd, Rn, Rm
         regs[Rd] = (regs[Rn] < regs[Rm]) ? regs[Rn] : regs[Rm];
     } else { // udivm Rd, Rp, Rn, Rm or umod Rd, Rn, Rm
+        is_bad_reg(Rd);
+        is_bad_reg(Rp);
         is_bad_reg(Rn);
         is_bad_reg(Rm);
         if (Rn == Rm) { // x / x == 1, ya dummy.
@@ -376,11 +386,11 @@ static void decode_wide_000(u32 *regs, u32 insn)
 // Signed arithmetic, otherwise identical to the unsigned one
 // 000001 aaaabbbbccccdddd
 // if a == SP
-//    regs[b] %= cd
+//    RESERVED
 // else if a == PC
 //    regs[b] = smax(regs[c], regs[d])
 // else if b == SP
-//    regs[a] /= cd
+//    RESERVED
 // else if b == PC
 //    regs[a] = smin(regs[c], regs[d])
 // else
@@ -392,26 +402,15 @@ static void decode_wide_001(u32 *regs, u32 insn)
     u32 Rp = (insn >> 8) & 0xF;
     u32 Rn = (insn >> 4) & 0xF;
     u32 Rm = (insn >> 0) & 0xF;
-    regs[REG_PC] += 4;
-    if (Rd == REG_SP) { // smod Rd, #imm8
-        is_bad_reg(Rp);
-        s32 imm8 = insn & 0xFF;
-        if (imm8 == 0) {
-            die("smod with imm8 == 0 is reserved!\n");
-        }
-        regs[Rp] = (u32)((s32)regs[Rp] % imm8);
-    } else if (Rd == REG_PC) { // smax Rd, Rn, Rm
+
+    if (Rd == REG_PC) { // smax Rd, Rn, Rm
         is_bad_reg(Rp);
         regs[Rp] = ((s32)regs[Rn] > (s32)regs[Rm]) ? regs[Rn] : regs[Rm];
-    } else if (Rp == REG_SP) { // sdiv Rd, #imm8
-        s32 imm8 = insn & 0xFF;
-        if (imm8 == 0) {
-	    die("sdiv with imm8 == 0 is reserved!\n");
-        }
-        regs[Rd] = (u32)((s32)regs[Rd] / imm8);
     } else if (Rp == REG_PC) { // smin Rd, Rn, Rm
         regs[Rp] = ((s32)regs[Rn] < (s32)regs[Rm]) ? regs[Rn] : regs[Rm];
     } else { // sdivm Rd, Rp, Rn, Rm or smod Rd, Rn, Rm
+        is_bad_reg(Rd);
+        is_bad_reg(Rp);
         is_bad_reg(Rn);
         is_bad_reg(Rm);
         if (Rn == Rm) {
@@ -422,32 +421,173 @@ static void decode_wide_001(u32 *regs, u32 insn)
         regs[Rd] = (u32)quotient;
         regs[Rp] = (u32)remainder; // just overwrite for smod
     }
+    regs[REG_PC] += 4;
+}
+
+// unsigned divide by immediate
+//   000010 dddd nnnn iiiiiiii
+// unsigned modulo by immediate
+//   000011 dddd nnnn iiiiiiii
+// signed divide by immediate
+//   000110 dddd nnnn iiiiiiii
+// signed modulo by immediate
+//   000117 dddd nnnn iiiiiiii
+// dddd and nnnn must not be PC or SP
+// i must not be zero
+static void decode_wide_divmodi(u32 *regs, u32 insn)
+{
+    u32 Rd = (insn >> 12) & 0xF;
+    u32 Rn = (insn >> 8) & 0xF;
+    u32 divisor = insn & 0xFF;
+
+    is_bad_reg(Rd);
+    is_bad_reg(Rn);
+    if (divisor == 0) {
+        die("division/modulo with imm == 0 is reserved!\n");
+    }
+    switch ((insn >> 16) & 007) {
+        case 002: regs[Rd] = regs[Rn] / divisor; break;
+        case 003: regs[Rd] = regs[Rn] % divisor; break;
+        case 006: regs[Rd] = (s32)regs[Rn] / (s32)divisor; break;
+        case 007: regs[Rd] = (s32)regs[Rn] % (s32)divisor; break;
+        // should never happen
+        default: illegal();
+    }
+    regs[REG_PC] += 4;
+}
+
+// Wide I/O instructions
+//
+// 000010 op: 3 or 4 ...
+// on output instructions, pc represents stdout and sp
+// represents stderr.
+// on input instructions, pc represents stdin
+
+// op = 0000: write
+// note:
+//    when llll == 1111, it uses strlen
+//    when llll == 1101, it uses strlen and adds newline
+// 000100 0000 ffff bbbb llll -> write(f, b, l)
+// 000100 0000 1111 bbbb llll -> write(1, b, l) (a.k.a. puts.w)
+// 000100 0000 1101 bbbb llll -> write(2, b, l)
+static void decode_wide_write(u32 *regs, u32 insn)
+{
+    regs[REG_PC] += 4;
+
+    char *str = (char *)regs[(insn >> 4) & 0xF];
+    if (str == NULL)
+        return;
+
+    u32 len_arg = insn & 0xF;
+    int add_newline = 0;
+    size_t len;
+    switch (len_arg) {
+    case REG_SP:
+        add_newline = 1;
+        // fallthrough
+    case REG_PC:
+        len = strlen(str);
+        break;
+    default:
+        len = regs[len_arg];
+        break;
+    }
+
+    u32 fd_arg = (insn >> 8) & 0xF;
+    int fd;
+    switch (fd_arg) {
+    case REG_PC:
+        fd = 1;
+        break;
+    case REG_SP:
+        fd = 2;
+        break;
+    default:
+        fd = regs[fd_arg];
+        break;
+    }
+
+    // todo: switch to veneer to stdout
+    write(fd, str, len);
+    if (add_newline) {
+        char newline = '\n';
+        write(fd, &newline, 1);
+    }
+}
+
+// op = 0001: read (not implemented yet)
+// note:
+//    sets zf on success
+//    when llll == 1111, reads a full line, removing newline
+//    when llll == 1101, reads a full line, including newline
+// 000100 0001 ffff bbbb llll -> read(f, b, l)
+// 000100 0001 1111 bbbb llll -> read(0, b, l)
+// 000100 0001 1101 dddd ffff -> read(f, &d, 1)
+
+// planned but not implemented yet
+// 000100 001 dddd nnnn ctarw -> d = open(n, flags, 0644)
+// 000100 001 1111 dddd xxxxx -> close(d)?
+// 000100 0100 ffff iiiiiiii  -> write(f, &c, 1)
+// 000100 0101 ffff oooooooo  -> write(f, pc + o, strlen(pc + o)
+// if lowest bit is set, print newline
+// 000100 0110 ffff rrrr 000 n -> fprintf(f, "%i", r)
+// 000100 0110 ffff rrrr 100 n -> fprintf(f, "%u", r)
+// 000100 0110 ffff rrrr 101 n -> fprintf(f, "%08x", r)
+// Annoyingly, we don't get a snapshot of VFP.
+// 000100 0110 ffff rrrrr 11 n -> fprintf(f, "%g", dr) (vfp 64-bit reg)
+// 000100 0110 ffff rrrrr 10 n -> fprintf(f, "%g", (float)sr) (vfp 32-bit reg)
+
+static void decode_wide_io(u32 *regs, u32 insn)
+{
+    switch (insn & 0xE000) {
+    case 0x0000:
+        decode_wide_write(regs, insn);
+        break;
+    default:
+        die("wip");
+    }
 }
 
 // Wide instructions are significantly more flexible and feel more like Thumb-2.
 // Similar to Thumb-2, it treats SP and PC differently than other registers, and
 // it is used to encode other instructions.
 //
-// Note that not all instructions are in the X, Y, Z format. See udiv Rd, #imm.
+// Note that not all instructions may be in the X, Y, Z format, nor will you get
+// the fancy imm12 encoding found in most wide instructions.
+//
 // This is because we only have ~21 bits (compared to Thumb-2's ~28 bits).
 //
-// I would rather have some instructions be dyadic than limit ALL instructions
-// to Lo registers or give up functionality.
-//
-// Classes are in octal, instruction data is not.
+// Classes are in octal, instruction data is usually in hex.
 static void decode_wide_insn(u32 *regs, u32 insn)
 {
     // We have 34 wide insn classes. That is because the swap register
     // instruction is commutative, so we encode it as 03XY where X > Y. If
     // X <= Y, it is a wide instruction
     switch ((insn >> 16) & 077) {
-        case 000: decode_wide_000(regs, insn); break;
-        case 001: decode_wide_001(regs, insn); break;
+        case 000:
+            decode_wide_000(regs, insn);
+            break;
+        case 001:
+            decode_wide_001(regs, insn);
+            break;
+        case 002:
+        case 003:
+        case 006:
+        case 007:
+            decode_wide_divmodi(regs, insn);
+            break;
+        case 004:
+            decode_wide_io(regs, insn);
+            break;
         default: illegal(); // WIP
     }
 }
 
-static void sighandler(int signo, siginfo_t *si, void *data)
+// The main entry point to the ThumbGolf runtime, triggered via sigaction.
+//
+// sigaction will pass the a snapshot of the processor, which we can modify.
+// We use this to emulate the ThumbGolf extensions.
+static void thumbgolf_handler(int signo, siginfo_t *si, void *data)
 {
     ucontext_t *uc = (ucontext_t *)data;
     u32 *regs = &uc->uc_mcontext.arm_r0;
@@ -600,8 +740,9 @@ static void sighandler(int signo, siginfo_t *si, void *data)
 }
 
 // Run before main
+// Yes, this can be static. No symbols are exported from this file. :)
 __attribute__((constructor))
-void thumbgolf_inject(void)
+static void thumbgolf_inject(void)
 {
     // Set stdout, stdin, and stderr to unbuffered mode to avoid conflicts
     // with manual syscalls.
@@ -612,8 +753,7 @@ void thumbgolf_inject(void)
     // Set up the signal handler
     struct sigaction sa, osa;
     sa.sa_flags = SA_ONSTACK | SA_RESTART | SA_NODEFER | SA_SIGINFO;
-    sa.sa_sigaction = sighandler;
+    sa.sa_sigaction = thumbgolf_handler;
     sigaction(SIGILL, &sa, &osa);
     sigaction(SIGTRAP, &sa, &osa);
 }
-

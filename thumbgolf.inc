@@ -163,20 +163,19 @@
 	_tg_wide_4op	001, _tg_reg_arg_\Rd, _tg_reg_arg_\Rd, _tg_reg_arg_\Rn, _tg_reg_arg_\Rm
 .endm
 
-.macro umodi	Rd:req, imm8:req
-	_tg_wide_4op	000, _tg_reg_arg_sp, _tg_reg_arg_\Rd, (\imm8 >> 4), (\imm8 & 0xf)
+.macro udivi	Rd:req, Rn=Rd, imm8:req
+	_tg_wide_4op	002, _tg_reg_arg_\Rd, _tg_reg_arg_\Rn, (\imm8 >> 4), (\imm8 & 0xf)
+.endm
+.macro umodi	Rd:req, Rn=Rd, imm8:req
+	_tg_wide_4op	003, _tg_reg_arg_\Rd, _tg_reg_arg_\Rn, (\imm8 >> 4), (\imm8 & 0xf)
+.endm
+.macro sdivi	Rd:req, Rn=Rd, imm8:req
+	_tg_wide_4op	006, _tg_reg_arg_\Rd, _tg_reg_arg_\Rn, (\imm8 >> 4), (\imm8 & 0xf)
+.endm
+.macro smodi	Rd:req, Rn=Rd, imm8:req
+	_tg_wide_4op	007, _tg_reg_arg_\Rd, _tg_reg_arg_\Rn, (\imm8 >> 4), (\imm8 & 0xf)
 .endm
 
-.macro udivi	Rd:req, imm8:req
-	_tg_wide_4op	000, _tg_reg_arg_\Rd, _tg_reg_arg_sp, (\imm8 >> 4), (\imm8 & 0xf)
-.endm
-.macro smodi	Rd:req, imm8:req
-	_tg_wide_4op	001, _tg_reg_arg_sp, _tg_reg_arg_\Rd, (\imm8 >> 4), (\imm8 & 0xf)
-.endm
-
-.macro sdivi	Rd:req, imm8:req
-	_tg_wide_4op	001, _tg_reg_arg_\Rd, _tg_reg_arg_sp, (\imm8 >> 4), (\imm8 & 0xf)
-.endm
 
 // Block the user from using sdiv and udiv in IT blocks. While it works on
 // hardware, our emulation will not.

@@ -1,4 +1,7 @@
 	.include "../thumbgolf.inc"
+	// function must be misaligned, subtract 2 bytes
+	.align 2
+	nop
 	.globl main
 	.thumb_func
 main:
@@ -7,8 +10,7 @@ main:
 	adds	r1, #1
 .Lthree:
 	// r0 = r1 % 3
-	movs	r0, r1
-	umodi	r0, 3	// udf #0300; .short 0xd003
+	umodi	r0, r1, 3	// udf #0303; .short 0x0103
 	// if r0 == 0
 	cbnz	r0, .Lten
 	// if so print "Fizz"
@@ -16,10 +18,8 @@ main:
 	puts	r3	// udf #0003
 .Lten:
 	// do the same for Buzz
-	// r2 = (r1 * 2) % 10, a.k.a. r1 % 5
-	// we do this because umod.10 is a special narrow instruction :)
-	lsls	r2, r1, #1
-	umod.10	r2	// udf #0152
+	// r2 = r1 % 5
+	umodi	r2, r1, 5	// udf #0303; .short 0x2105
 	cbnz	r2, .Lnum
 	adr	r3, .Lbuzz
 	puts	r3	// udf #0003
@@ -60,6 +60,7 @@ main:
 	// was r1 % 3 not zero?
 	cbz	r0, .Lnoprint
 	// if so, print r1 as integer
+
 	puti	r1	// udf #0041
 .Lnoprint:
 	// print newline

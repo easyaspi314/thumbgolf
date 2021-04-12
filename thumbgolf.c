@@ -41,6 +41,9 @@
 // to match register types
 typedef unsigned long u32;
 typedef long s32;
+typedef unsigned short u16;
+typedef unsigned long long u64;
+
 /*
  * How function calls work
  *
@@ -58,7 +61,7 @@ typedef long s32;
  * first to call the function and then to clean up after the function.
  *
  * Each callback, if it returns a value, returns in both r0 and r1, written as
- * returning uint64_t.
+ * returning u64.
  *
  * The lower 32 bits (r0) represent the value we got, and the upper 32 bits (r1)
  * are the "success" flag. We use this to set the Z flag to indicate success.
@@ -84,6 +87,38 @@ typedef long s32;
 #define REG_LR 14
 #define REG_PC 15
 #define REG_CPSR 16
+
+typedef union {
+    u32 raw;
+    struct {
+        u32
+           mode     : 5,
+           thumb    : 1,
+           firq     : 1,
+           irq      : 1,
+           async    : 1,
+           endian   : 1,
+           it_hi    : 6,
+           gt_eq    : 4,
+           jazelle  : 1,
+           it_lo    : 2,
+           saturate : 1,
+           overflow : 1,
+           carry    : 1,
+           zero     : 1,
+           negative : 1;
+    };
+} arm_cpsr;
+
+typedef struct {
+    u32 r[16];
+    arm_cpsr cpsr;
+// TODO
+//    union {
+//        double qregs[16];
+//        float dregs[32];
+//    };
+} tgolf_state;
 
 _Static_assert(offsetof(struct sigcontext, arm_cpsr) - offsetof(struct sigcontext, arm_r0) == 64, "bad siginfo_t");
 
@@ -112,10 +147,10 @@ static void *xmalloc(size_t num)
     return ret;
 }
 
-static uint64_t get_int(void)
+static u64 get_int(void)
 {
     int tmp = 0;
-    uint64_t ret = scanf("%i", &tmp) == 1;
+    u64 ret = scanf("%i", &tmp) == 1;
     if (!ret) {
         // skip to end on error
         int c;
@@ -142,24 +177,24 @@ static void put_str_n(const char *str)
 static char *scanf_buffer = NULL;
 
 // TODO: replace %m with something that works on Android <= 8
-static uint64_t get_str(void)
+static u64 get_str(void)
 {
     free(scanf_buffer);
     scanf_buffer = NULL;
-    uint64_t ret = scanf("%m[^\n]", &scanf_buffer) == 1;
+    u64 ret = scanf("%m[^\n]", &scanf_buffer) == 1;
     return (u32)scanf_buffer | (ret << 32);
 }
 
-static uint64_t get_word(void)
+static u64 get_word(void)
 {
     free(scanf_buffer);
     scanf_buffer = NULL;
-    uint64_t ret = scanf("%ms", &scanf_buffer) == 1;
+    u64 ret = scanf("%ms", &scanf_buffer) == 1;
     return (u32)scanf_buffer | (ret << 32);
 }
 
 
-static uint64_t get_char(void)
+static u64 get_char(void)
 {
     int c = getchar();
     if (c == EOF) {
@@ -187,13 +222,13 @@ static void put_special(u32 insn)
     put_char(special_chars[insn & 7]);
 }
 
-static uint64_t get_rand(void)
+static u64 get_rand(void)
 {
     u32 ret = 0;
     FILE *f = fopen("/dev/urandom", "rb");
     fread(&ret, 4, 1, f);
     fclose(f);
-    uint64_t is_zero = ret == 0;
+    u64 is_zero = ret == 0;
     return ret | (is_zero << 32);
 }
 
@@ -235,104 +270,17 @@ struct io_callback
 // Wide versions are planned which will accept all registers and add more
 // options.
 static const struct io_callback io_funcs[] = {
-    { &put_str_n, MODE_VOID | MODE_OUTPUT_REG },  // puts   Rn
-    { &get_str, MODE_REG_Z },                     // gets   Rd
-    { &put_char, MODE_VOID | MODE_OUTPUT_REG },   // putc   Rn
-    { &get_char, MODE_REG_Z },                    // getc   Rd
-    { &put_int_n, MODE_VOID | MODE_OUTPUT_REG },  // puti   Rn
-    { &get_int, MODE_REG_Z },                     // geti   Rd
-    { &get_word, MODE_REG_Z },                    // getw   Rd
-    { &put_special, MODE_VOID | MODE_IMM },       // putspc #imm
+    { &put_str_n, MODE_OUTPUT_REG },  // puts   Rn
+    { &get_str, MODE_REG_Z },         // gets   Rd
+    { &put_char, MODE_OUTPUT_REG },   // putc   Rn
+    { &get_char, MODE_REG_Z },        // getc   Rd
+    { &put_int_n, MODE_OUTPUT_REG },  // puti   Rn
+    { &get_int, MODE_REG_Z },         // geti   Rd
+    { &get_word, MODE_REG_Z },        // getw   Rd
+    { &put_special, MODE_IMM },       // putspc #imm
 };
 
 _Static_assert(sizeof(sig_atomic_t) >= sizeof(u32), "bad sig_atomic_t");
-
-static volatile sig_atomic_t in_libc_call = 0;
-// Caller saved registers
-static volatile sig_atomic_t old_r0 = 0;
-static volatile sig_atomic_t old_r1 = 0;
-static volatile sig_atomic_t old_r2 = 0;
-static volatile sig_atomic_t old_r3 = 0;
-static volatile sig_atomic_t old_r12 = 0;
-static volatile sig_atomic_t old_lr = 0;
-static volatile sig_atomic_t old_cpsr = 0;
-
-// A basic call veneer.
-__attribute__((__naked__, target("thumb")))
-static int64_t do_veneer(void)
-{
-    __asm__(
-        "bx      r12\n"
-    );
-}
-
-// Since we can't manually exchange instruction sets, and because stdio is NOT
-// signal safe, we need to veneer.
-// TODO: make more generic and simplify
-static void veneer(u32 *regs, const void *func, u32 insn, int mode)
-{
-    if (!in_libc_call) {
-        // Enter libc mode
-        in_libc_call = 1;
-        // Save r0, r1, r2, r3, r12, lr, and the CPSR.
-        old_r0   = (sig_atomic_t)regs[0];
-        old_r1   = (sig_atomic_t)regs[1];
-        old_r2   = (sig_atomic_t)regs[2];
-        old_r3   = (sig_atomic_t)regs[3];
-        old_r12  = (sig_atomic_t)regs[12];
-        old_lr   = (sig_atomic_t)regs[REG_LR];
-        old_cpsr = (sig_atomic_t)regs[REG_CPSR];
-        // If MODE_OUTREG, set r0 to the target register
-        if (mode & MODE_OUTPUT_REG) {
-            regs[0] = regs[insn & 7];
-        } else if (mode & MODE_IMM) {
-            regs[0] = insn;
-        }
-
-        // bx func via a rather typical r12 veneer
-        regs[12] = (u32)func;
-        regs[REG_LR] = regs[REG_PC] | 1; // set Thumb bit
-        // On actual hardware, the PC register ignores the lowest bit, and the
-        // address I write here will always be executed in Thumb state.
-        //
-        // However, QEMU, for some bizarre reason, will switch to ARM when the
-        // Thumb bit is set.
-        //
-        // Yes, you read that correctly.
-        regs[REG_PC] = ((u32)&do_veneer) & ~1;
-    } else {
-        // Exit libc mode
-        in_libc_call = 0;
-        // Restore the CPSR first.
-        regs[REG_CPSR] = (u32)old_cpsr;
-        // Restore registers in their expected position.
-        regs[2] = (u32)old_r2;
-        regs[3] = (u32)old_r3;
-        switch (mode & 3) {
-        case MODE_VOID: // Restore everything.
-            regs[0] = (u32)old_r0;
-            regs[1] = (u32)old_r1;
-            break;
-        case MODE_REG_Z:
-            // Set Z flag to result
-            regs[REG_CPSR] &= ~Z_CPSR;
-            regs[REG_CPSR] |= !!regs[1] * Z_CPSR;
-            // Restore r1
-            regs[1] = (u32)old_r1;
-            if ((insn & 7) != 0) {
-                regs[insn & 7] = regs[0];
-                regs[0] = old_r0;
-            }
-            break;
-        default: // TODO
-            break;
-        }
-        // Restore r12 and lr
-        regs[12]     = (u32)old_r12;
-        regs[REG_LR] = (u32)old_lr;
-        regs[REG_PC] += 2;
-    }
-}
 
 
 static void is_bad_reg(u32 regno)
@@ -355,7 +303,7 @@ static void is_bad_reg(u32 regno)
 // else
 //    regs[a] = regs[c] / regs[d]
 //    regs[b] = regs[c] % regs[d]
-static void decode_wide_000(u32 *regs, u32 insn)
+static void decode_wide_000(tgolf_state *s, u32 insn)
 {
     u32 Rd = (insn >> 12) & 0xF;
     u32 Rp = (insn >> 8) & 0xF;
@@ -364,9 +312,9 @@ static void decode_wide_000(u32 *regs, u32 insn)
 
     if (Rd == REG_PC) { // umax Rd, Rn, Rm
         is_bad_reg(Rp);
-        regs[Rp] = (regs[Rn] > regs[Rm]) ? regs[Rn] : regs[Rm];
+        s->r[Rp] = (s->r[Rn] > s->r[Rm]) ? s->r[Rn] : s->r[Rm];
     } else if (Rp == REG_PC) { // umin Rd, Rn, Rm
-        regs[Rd] = (regs[Rn] < regs[Rm]) ? regs[Rn] : regs[Rm];
+        s->r[Rd] = (s->r[Rn] < s->r[Rm]) ? s->r[Rn] : s->r[Rm];
     } else { // udivm Rd, Rp, Rn, Rm or umod Rd, Rn, Rm
         is_bad_reg(Rd);
         is_bad_reg(Rp);
@@ -375,12 +323,11 @@ static void decode_wide_000(u32 *regs, u32 insn)
         if (Rn == Rm) { // x / x == 1, ya dummy.
             die("udivm a, b, c, c is reserved!\n");
         }
-        u32 quotient = regs[Rm] != 0 ? regs[Rn] / regs[Rm] : 0;
-        u32 remainder = regs[Rm] != 0 ? regs[Rn] % regs[Rm] : 0;
-        regs[Rd] = quotient;
-        regs[Rp] = remainder; // just overwrite for sdivm
+        u32 quotient = s->r[Rm] != 0 ? s->r[Rn] / s->r[Rm] : 0;
+        u32 remainder = s->r[Rm] != 0 ? s->r[Rn] % s->r[Rm] : 0;
+        s->r[Rd] = quotient;
+        s->r[Rp] = remainder; // just overwrite for sdivm
     }
-    regs[REG_PC] += 4;
 }
 
 // Signed arithmetic, otherwise identical to the unsigned one
@@ -396,7 +343,7 @@ static void decode_wide_000(u32 *regs, u32 insn)
 // else
 //    regs[a] = regs[c] / regs[d]
 //    regs[b] = regs[c] % regs[d]
-static void decode_wide_001(u32 *regs, u32 insn)
+static void decode_wide_001(tgolf_state *s, u32 insn)
 {
     u32 Rd = (insn >> 12) & 0xF;
     u32 Rp = (insn >> 8) & 0xF;
@@ -405,9 +352,9 @@ static void decode_wide_001(u32 *regs, u32 insn)
 
     if (Rd == REG_PC) { // smax Rd, Rn, Rm
         is_bad_reg(Rp);
-        regs[Rp] = ((s32)regs[Rn] > (s32)regs[Rm]) ? regs[Rn] : regs[Rm];
+        s->r[Rp] = ((s32)s->r[Rn] > (s32)s->r[Rm]) ? s->r[Rn] : s->r[Rm];
     } else if (Rp == REG_PC) { // smin Rd, Rn, Rm
-        regs[Rp] = ((s32)regs[Rn] < (s32)regs[Rm]) ? regs[Rn] : regs[Rm];
+        s->r[Rp] = ((s32)s->r[Rn] < (s32)s->r[Rm]) ? s->r[Rn] : s->r[Rm];
     } else { // sdivm Rd, Rp, Rn, Rm or smod Rd, Rn, Rm
         is_bad_reg(Rd);
         is_bad_reg(Rp);
@@ -416,12 +363,11 @@ static void decode_wide_001(u32 *regs, u32 insn)
         if (Rn == Rm) {
             die("sdivm a, b, c, c is reserved!\n");
         }
-        s32 quotient = regs[Rm] != 0 ? (s32)regs[Rn] / (s32)regs[Rm] : 0;
-        s32 remainder = regs[Rm] != 0 ? (s32)regs[Rn] % (s32)regs[Rm] : 0;
-        regs[Rd] = (u32)quotient;
-        regs[Rp] = (u32)remainder; // just overwrite for smod
+        s32 quotient = s->r[Rm] != 0 ? (s32)s->r[Rn] / (s32)s->r[Rm] : 0;
+        s32 remainder = s->r[Rm] != 0 ? (s32)s->r[Rn] % (s32)s->r[Rm] : 0;
+        s->r[Rd] = (u32)quotient;
+        s->r[Rp] = (u32)remainder; // just overwrite for smod
     }
-    regs[REG_PC] += 4;
 }
 
 // unsigned divide by immediate
@@ -434,7 +380,7 @@ static void decode_wide_001(u32 *regs, u32 insn)
 //   000117 dddd nnnn iiiiiiii
 // dddd and nnnn must not be PC or SP
 // i must not be zero
-static void decode_wide_divmodi(u32 *regs, u32 insn)
+static void decode_wide_divmodi(tgolf_state *s, u32 insn)
 {
     u32 Rd = (insn >> 12) & 0xF;
     u32 Rn = (insn >> 8) & 0xF;
@@ -446,14 +392,13 @@ static void decode_wide_divmodi(u32 *regs, u32 insn)
         die("division/modulo with imm == 0 is reserved!\n");
     }
     switch ((insn >> 16) & 007) {
-        case 002: regs[Rd] = regs[Rn] / divisor; break;
-        case 003: regs[Rd] = regs[Rn] % divisor; break;
-        case 006: regs[Rd] = (s32)regs[Rn] / (s32)divisor; break;
-        case 007: regs[Rd] = (s32)regs[Rn] % (s32)divisor; break;
+        case 002: s->r[Rd] = s->r[Rn] / divisor; break;
+        case 003: s->r[Rd] = s->r[Rn] % divisor; break;
+        case 006: s->r[Rd] = (s32)s->r[Rn] / (s32)divisor; break;
+        case 007: s->r[Rd] = (s32)s->r[Rn] % (s32)divisor; break;
         // should never happen
         default: illegal();
     }
-    regs[REG_PC] += 4;
 }
 
 // Wide I/O instructions
@@ -470,11 +415,9 @@ static void decode_wide_divmodi(u32 *regs, u32 insn)
 // 000100 0000 ffff bbbb llll -> write(f, b, l)
 // 000100 0000 1111 bbbb llll -> write(1, b, l) (a.k.a. puts.w)
 // 000100 0000 1101 bbbb llll -> write(2, b, l)
-static void decode_wide_write(u32 *regs, u32 insn)
+static void decode_wide_write(tgolf_state *s, u32 insn)
 {
-    regs[REG_PC] += 4;
-
-    char *str = (char *)regs[(insn >> 4) & 0xF];
+    char *str = (char *)s->r[(insn >> 4) & 0xF];
     if (str == NULL)
         return;
 
@@ -489,7 +432,7 @@ static void decode_wide_write(u32 *regs, u32 insn)
         len = strlen(str);
         break;
     default:
-        len = regs[len_arg];
+        len = s->r[len_arg];
         break;
     }
 
@@ -503,7 +446,7 @@ static void decode_wide_write(u32 *regs, u32 insn)
         fd = 2;
         break;
     default:
-        fd = regs[fd_arg];
+        fd = s->r[fd_arg];
         break;
     }
 
@@ -537,11 +480,11 @@ static void decode_wide_write(u32 *regs, u32 insn)
 // 000100 0110 ffff rrrrr 11 n -> fprintf(f, "%g", dr) (vfp 64-bit reg)
 // 000100 0110 ffff rrrrr 10 n -> fprintf(f, "%g", (float)sr) (vfp 32-bit reg)
 
-static void decode_wide_io(u32 *regs, u32 insn)
+static void decode_wide_io(tgolf_state *s, u32 insn)
 {
     switch (insn & 0xE000) {
     case 0x0000:
-        decode_wide_write(regs, insn);
+        decode_wide_write(s, insn);
         break;
     default:
         die("wip");
@@ -558,31 +501,162 @@ static void decode_wide_io(u32 *regs, u32 insn)
 // This is because we only have ~21 bits (compared to Thumb-2's ~28 bits).
 //
 // Classes are in octal, instruction data is usually in hex.
-static void decode_wide_insn(u32 *regs, u32 insn)
+static void decode_wide_insn(tgolf_state *s, u32 insn)
 {
     // We have 34 wide insn classes. That is because the swap register
     // instruction is commutative, so we encode it as 03XY where X > Y. If
     // X <= Y, it is a wide instruction
     switch ((insn >> 16) & 077) {
         case 000:
-            decode_wide_000(regs, insn);
+            decode_wide_000(s, insn);
             break;
         case 001:
-            decode_wide_001(regs, insn);
+            decode_wide_001(s, insn);
             break;
         case 002:
         case 003:
         case 006:
         case 007:
-            decode_wide_divmodi(regs, insn);
+            decode_wide_divmodi(s, insn);
             break;
         case 004:
-            decode_wide_io(regs, insn);
+            decode_wide_io(s, insn);
             break;
         default: illegal(); // WIP
     }
 }
 
+// Ghetto mutex
+#define HANDLER_STATE_NORMAL 0
+#define HANDLER_STATE_RETURNING 1
+#define HANDLER_STATE_BUSY 2
+static volatile sig_atomic_t handler_state = HANDLER_STATE_NORMAL;
+
+static volatile sig_atomic_t regs_buf[16];
+static volatile sig_atomic_t cpsr_buf;
+
+static void tgolf_parse(void)
+{
+    // We don't want to do everything with volatiles. That is dumb.
+    // Make a convenient local copy in an easy to parse struct.
+    tgolf_state s;
+    for (int i = 0; i < 16; i++)
+        s.r[i] = (u32)regs_buf[i];
+    s.cpsr.raw = (u32)cpsr_buf;
+
+    u32 insn = *(u16 *)(s.r[REG_PC] & ~1);
+
+    // Narrow instructions are 0xyz, where x is a 2 bit selector,
+    // y is the operation (or register in a swap), z is the target
+    // register.
+
+    // Wide instructions have a 6 bit ID, starting with 03xy, but
+    // it is actually 34 because x must be <= y. When x > y, it is a
+    // commutative swap.
+    switch (insn & 0300) {
+        case 0000: { // SPIM-style I/O
+            int id = (insn >> 3) & 7;
+            switch (io_funcs[id].mode) {
+                case MODE_REG_Z: {
+                    u64 result = ((u64(*)(void))io_funcs[id].func)();
+                    s.r[insn & 7] = (u32)result;
+                    s.cpsr.zero = (u32)(result >> 32);
+                    break;
+                }
+                case MODE_OUTPUT_REG: {
+                    ((void(*)(u32))io_funcs[id].func)(s.r[insn & 7]);
+                    break;
+                }
+                default: {
+                    ((void(*)(u32))io_funcs[id].func)(insn);
+                    break;
+                }
+            }
+            s.r[REG_PC] += 2;
+            break;
+        } case 0100: { // narrow arithmetic
+            switch (insn & 0070) {
+                case 0000:  // adcs Rd, #0
+                case 0010:  // sbcs Rd, #0
+                    die("adcs/sbcs are coming soon.\n");
+                case 0020: { // movs Rd, #-1
+                    s.r[insn & 7] = -1;
+                    s.cpsr.zero = 0;
+                    s.cpsr.negative = 1;
+                    s.cpsr.carry = 0;
+                    s.cpsr.overflow = 0;
+                    s.r[REG_PC] += 2;
+                    break;
+                }
+                case 0030: { // abs Rd
+                    if ((s32)s.r[insn & 7] < 0) {
+                        s.r[insn & 7] = -s.r[insn & 7];
+                    }
+                    s.r[REG_PC] += 2;
+                    break;
+                }
+                case 0040: { // udiv Rd, #10
+                    s.r[insn & 7] /= 10;
+                    s.r[REG_PC] += 2;
+                    break;
+                }
+                case 0050: { // umod Rd, #10
+                    s.r[insn & 7] %= 10;
+                    s.r[REG_PC] += 2;
+                    break;
+                }
+                case 0060: { // mul Rd, #10
+                    s.r[insn & 7] *= 10;
+                    s.r[REG_PC] += 2;
+                    break;
+                }
+                case 0070: { // rand Rd
+                    s.r[insn & 7] = get_rand();
+                    s.r[REG_PC] += 2;
+                    break;
+                }
+            }
+            break;
+        }
+        case 0200: { // narrow swap with memory
+            // swapm  Rd, [Rt]
+            int Rt = insn & 7;
+            int Rd = (insn >> 3) & 7;
+
+            u32 *Mt = (u32 *)s.r[Rt];
+            u32 tmp = *Mt;
+            *Mt = s.r[Rd];
+            s.r[Rd] = tmp;
+            s.r[REG_PC] += 2;
+            break;
+        }
+        case 0300: { // swap register or wide instruction
+            // The function of this instruction depends on if Rn is
+            // greater than Rm. If it is, it is a swap instruction.
+            // If it isn't, it is a wide instruction.
+            int Rn = (insn >> 3) & 7;
+            int Rm = insn & 7;
+            if (Rn > Rm) { // swap Rn, Rm
+                u32 tmp = s.r[Rn];
+                s.r[Rn] = s.r[Rm];
+                s.r[Rm] = tmp;
+                s.r[REG_PC] += 2;
+            } else { // wide instruction
+                u32 insn2 = ((const u16 *)(s.r[REG_PC]&~1))[1];
+                u32 wide_insn = (((u32)insn & 077) << 16) | insn2;
+                decode_wide_insn(&s, wide_insn);
+                s.r[REG_PC] += 4;
+            }
+            break;
+        }
+    }
+    // Restore the state
+    for (int i = 0; i < 16; i++)
+        regs_buf[i] = (sig_atomic_t)s.r[i];
+    cpsr_buf = (sig_atomic_t)s.cpsr.raw;
+    // Update handler state
+    handler_state = HANDLER_STATE_RETURNING;
+}
 // The main entry point to the ThumbGolf runtime, triggered via sigaction.
 //
 // sigaction will pass the a snapshot of the processor, which we can modify.
@@ -591,100 +665,70 @@ static void thumbgolf_handler(int signo, siginfo_t *si, void *data)
 {
     ucontext_t *uc = (ucontext_t *)data;
     u32 *regs = &uc->uc_mcontext.arm_r0;
-    u32 *cpsr = &uc->uc_mcontext.arm_cpsr;
+    arm_cpsr *cpsr = (arm_cpsr*)&uc->uc_mcontext.arm_cpsr;
     // only trap Thumb instructions
-    if (*cpsr & THUMB_CPSR) {
-        uint16_t insn = *(const uint16_t *)(uc->uc_mcontext.arm_pc&~1);
-        if (IT_STATE(*cpsr)) {
+    if (cpsr->thumb) {
+        u16 insn = *(const u16 *)(uc->uc_mcontext.arm_pc&~1);
+        if (cpsr->it_lo || cpsr->it_hi) {
             die("ThumbGolf instructions are not supported in IT blocks (yet).\n");
         }
         // udf.n: DExx
         // NOTE: Narrow instructions and wide opcodes are in octal, while
         // wide instructions are in hex.
         if ((insn & 0xFF00) == 0xDE00) {
-            // Narrow instructions are 0xyz, where x is a 2 bit selector,
-            // y is the operation (or register in a swap), z is the target
-            // register.
 
-            // Wide instructions have a 6 bit ID, starting with 03xy, but
-            // it is actually 34 because x must be <= y. When x > y, it is a
-            // commutative swap.
-            switch (insn & 0300) {
-                case 0000: { // SPIM-style I/O
-                    int id = (insn >> 3) & 7;
-                    veneer(regs, io_funcs[id].func, insn, io_funcs[id].mode);
-                    break;
-                }
-                case 0100: { // narrow arithmetic
-                    switch (insn & 0070) {
-                        case 0000:  // adcs Rd, #0
-                        case 0010:  // sbcs Rd, #0
-                            die("adcs/sbcs are coming soon.\n");
-                        case 0020: { // movs Rd, #-1
-                            regs[insn & 7] = -1;
-                            regs[REG_CPSR] &= ~(Z_CPSR | N_CPSR | C_CPSR | V_CPSR);
-                            regs[REG_CPSR] |= N_CPSR;
-                            regs[REG_PC] += 2;
-                            break;
-                        }
-                        case 0030: { // abs Rd
-                            if ((s32)regs[insn & 7] < 0) {
-                                regs[insn & 7] = -regs[insn & 7];
-                            }
-                            regs[REG_PC] += 2;
-                            break;
-                        }
-                        case 0040: { // udiv Rd, #10
-                            regs[insn & 7] /= 10;
-                            regs[REG_PC] += 2;
-                            break;
-                        }
-                        case 0050: { // umod Rd, #10
-                            regs[insn & 7] %= 10;
-                            regs[REG_PC] += 2;
-                            break;
-                        }
-                        case 0060: { // mul Rd, #10
-                            regs[insn & 7] *= 10;
-                            regs[REG_PC] += 2;
-                            break;
-                        }
-                        case 0070: { // rand Rd
-                            veneer(regs, &get_rand, insn, MODE_REG_Z);
-                            break;
-                        }
-                    }
-                    break;
-                }
-                case 0200: { // narrow swap with memory
-                    // swapm  Rd, [Rt]
-                    int Rt = insn & 7;
-                    int Rd = (insn >> 3) & 7;
+            // Veneer into user mode. We can't actually do much from a signal
+            // handler, thanks to the good stuff not being Async-Signal-Safe.
+            //
+            // This works by throwing SIGILL twice.
+            // The first time, we save all registers to a buffer, then effectively
+            // call tgolf_parse() by modifying the PC directly.
+            // The return address is set to the offending instruction, but we
+            // set a flag.
+            //
+            // The second time, we restore the registers and clear the flag.
+            switch (handler_state) {
+                case HANDLER_STATE_NORMAL: {
+                    handler_state = HANDLER_STATE_BUSY;
 
-                    u32 *Mt = (u32 *)regs[Rt];
-                    u32 tmp = *Mt;
-                    *Mt = regs[Rd];
-                    regs[Rd] = tmp;
-                    regs[REG_PC] += 2;
+                    // Save the registers to our buffer to access them from the
+                    // main thread.
+                    for (int i = 0; i < 16; i++)
+                        regs_buf[i] = (sig_atomic_t)regs[i];
+
+                    cpsr_buf = (sig_atomic_t)cpsr->raw;
+
+                    // Simulate a bl to tgolf_parse.
+
+                    // Set the return address to the offending instruction, so
+                    // upon returning from tgolf_parse(), we will throw SIGILL again.
+                    regs[REG_LR] = regs[REG_PC] | 1; // Thumb bit
+
+                    // And jump to tgolf_parse by modifying the PC.
+                    // Note that despite being a Thumb function, we have to clear
+                    // the Thumb bit. It doesn't matter on hardware, but QEMU will,
+                    // for some reason, switch to ARM mode if the Thumb bit is set.
+                    regs[REG_PC] = (u32)(&tgolf_parse) & ~1;
                     break;
                 }
-                case 0300: { // swap register or wide instruction
-                    // The function of this instruction depends on if Rn is
-                    // greater than Rm. If it is, it is a swap instruction.
-                    // If it isn't, it is a wide instruction.
-                    int Rn = (insn >> 3) & 7;
-                    int Rm = insn & 7;
-                    if (Rn > Rm) { // swap Rn, Rm
-                        u32 tmp = regs[Rn];
-                        regs[Rn] = regs[Rm];
-                        regs[Rm] = tmp;
-                        regs[REG_PC] += 2;
-                    } else { // wide instruction
-                        u32 insn2 = ((const uint16_t *)(uc->uc_mcontext.arm_pc&~1))[1];
-                        u32 wide_insn = (((u32)insn & 077) << 16) | insn2;
-                        decode_wide_insn(regs, wide_insn);
-                    }
+                case HANDLER_STATE_RETURNING: {
+                    handler_state = HANDLER_STATE_BUSY;
+
+                    // Restore the modified register set
+                    for (int i = 0; i < 16; i++)
+                        regs[i] = (u32)regs_buf[i];
+
+                    cpsr->raw = (u32)cpsr_buf;
+
+                    // Clear the flag.
+                    handler_state = HANDLER_STATE_NORMAL;
                     break;
+                }
+                default: { // handler during handling?!
+                    die(
+                       "Double ThumbGolf exception detected!\n"
+                       "Note that multiple threads are not supported at this time.\n"
+                    );
                 }
             }
         // bkpt: BExx
@@ -703,7 +747,7 @@ static void thumbgolf_handler(int signo, siginfo_t *si, void *data)
         // udiv: FBBx xxFx
         // TODO: IT blocks
         }  else if ((insn & 0xFFD0) == 0xFB90) {
-              u32 insn2 = ((const uint16_t *)(uc->uc_mcontext.arm_pc&~1))[1];
+              u32 insn2 = ((const u16 *)(uc->uc_mcontext.arm_pc&~1))[1];
               if ((insn2 & 0x00F0) == 0x00F0) {
                   // To be ABSOLUTELY safe, forcibly call libgcc.
                   // The last thing we want is an infinite loop.

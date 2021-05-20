@@ -36,6 +36,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <stdbool.h>
 #include <ctype.h>
 
 // to match register types
@@ -91,22 +92,26 @@ typedef unsigned long long u64;
 typedef union {
     u32 raw;
     struct {
-        u32
-           mode     : 5,
-           thumb    : 1,
-           firq     : 1,
-           irq      : 1,
-           async    : 1,
-           endian   : 1,
-           it_hi    : 6,
-           gt_eq    : 4,
-           jazelle  : 1,
-           it_lo    : 2,
-           saturate : 1,
-           overflow : 1,
-           carry    : 1,
-           zero     : 1,
-           negative : 1;
+        u32  mode     : 5;
+        bool thumb    : 1;
+        bool firq     : 1;
+        bool irq      : 1;
+        bool async    : 1;
+        bool endian   : 1;
+        bool it_c     : 1;
+        bool it_b     : 1;
+        bool it_a     : 1;
+        u32  it_cond  : 3;
+        u32  gt_eq    : 4;
+        u32  unused   : 4;
+        bool jazelle  : 1;
+        bool it_e     : 1;
+        bool it_d     : 1;
+        bool saturate : 1;
+        bool overflow : 1;
+        bool carry    : 1;
+        bool zero     : 1;
+        bool negative : 1;
     };
 } arm_cpsr;
 
@@ -123,18 +128,42 @@ typedef struct {
 _Static_assert(offsetof(struct sigcontext, arm_cpsr) - offsetof(struct sigcontext, arm_r0) == 64, "bad siginfo_t");
 
 // Rethrow SIGILL. We must disable our signal handlers first.
-_Noreturn static void illegal(void)
+_Noreturn static void rethrow(void)
 {
     signal(SIGILL, SIG_DFL);
     signal(SIGTRAP, SIG_DFL);
     raise(SIGILL);
+    // just in case
     exit(132);
 }
 
 _Noreturn static void die(const char *msg)
 {
     write(2, msg, strlen(msg));
-    illegal();
+    rethrow();
+}
+
+static char tohex(int x)
+{
+    if (x > 9) return 'a' + (x - 10);
+    return '0' + x;
+}
+
+_Noreturn static void illegal(u32 insn)
+{
+    char buf[] = "Illegal instruction xxxx\n\0xxx\n";
+    buf[23] = tohex(insn & 0xF);
+    buf[22] = tohex((insn >> 4) & 0xF);
+    buf[21] = tohex((insn >> 8) & 0xF);
+    buf[20] = tohex((insn >> 12) & 0xF);
+    if (insn >> 16) {
+        buf[24] = ' ';
+        buf[28] = tohex((insn >> 16) & 0xF);
+        buf[27] = tohex((insn >> 20) & 0xF);
+        buf[26] = tohex((insn >> 24) & 0xF);
+        buf[25] = tohex((insn >> 28) & 0xF);
+    }
+    die(buf);
 }
 
 static void *xmalloc(size_t num)
@@ -397,7 +426,7 @@ static void decode_wide_divmodi(tgolf_state *s, u32 insn)
         case 006: s->r[Rd] = (s32)s->r[Rn] / (s32)divisor; break;
         case 007: s->r[Rd] = (s32)s->r[Rn] % (s32)divisor; break;
         // should never happen
-        default: illegal();
+        default: illegal(insn);
     }
 }
 
@@ -437,24 +466,22 @@ static void decode_wide_write(tgolf_state *s, u32 insn)
     }
 
     u32 fd_arg = (insn >> 8) & 0xF;
-    int fd;
+    FILE *f;
     switch (fd_arg) {
     case REG_PC:
-        fd = 1;
+        f = stdout;
         break;
     case REG_SP:
-        fd = 2;
+        f = stderr;
         break;
     default:
-        fd = s->r[fd_arg];
+        f = (FILE *)s->r[fd_arg];
         break;
     }
 
-    // todo: switch to veneer to stdout
-    write(fd, str, len);
+    fwrite(str, 1, len, f);
     if (add_newline) {
-        char newline = '\n';
-        write(fd, &newline, 1);
+        fputc('\n', f);
     }
 }
 
@@ -465,11 +492,15 @@ static void decode_wide_write(tgolf_state *s, u32 insn)
 //    when llll == 1101, reads a full line, including newline
 // 000100 0001 ffff bbbb llll -> read(f, b, l)
 // 000100 0001 1111 bbbb llll -> read(0, b, l)
-// 000100 0001 1101 dddd ffff -> read(f, &d, 1)
+// 000100 0001 1101 dddd ffff -> d = fgetc(f)
 
 // planned but not implemented yet
-// 000100 001 dddd nnnn ctarw -> d = open(n, flags, 0644)
-// 000100 001 1111 dddd xxxxx -> close(d)?
+// 000100 0010 ffff nnnn 0mmm -> f = fopen(n, mode)
+// 000100 0010 ffff dddd 1mmm -> f = fdopen(d, mode)
+// 000100 0010 ffff 1111 0000 -> fclose(f)
+// 000100 0010 dddd 1101 ffff -> d = fileno(f) (automatically flushes)
+// 000100 0010 1111 1101 ffff -> fflush(f)
+// 000100 0010 1101 1101 ffff -> 
 // 000100 0100 ffff iiiiiiii  -> write(f, &c, 1)
 // 000100 0101 ffff oooooooo  -> write(f, pc + o, strlen(pc + o)
 // if lowest bit is set, print newline
@@ -479,7 +510,8 @@ static void decode_wide_write(tgolf_state *s, u32 insn)
 // Annoyingly, we don't get a snapshot of VFP.
 // 000100 0110 ffff rrrrr 11 n -> fprintf(f, "%g", dr) (vfp 64-bit reg)
 // 000100 0110 ffff rrrrr 10 n -> fprintf(f, "%g", (float)sr) (vfp 32-bit reg)
-
+// Syscalls
+// 000100 100x xxxx xxxx dddd -> d = syscall(x, r0 - r6)
 static void decode_wide_io(tgolf_state *s, u32 insn)
 {
     switch (insn & 0xE000) {
@@ -487,9 +519,17 @@ static void decode_wide_io(tgolf_state *s, u32 insn)
         decode_wide_write(s, insn);
         break;
     default:
-        die("wip");
+        illegal(insn);
     }
 }
+
+// 000101: register/memory manip
+// 000101 0000 xxxx yyyy 1111 -> swap x, y
+// 000101 0000 xxxx yyyy tttt -> swp  x, y, [t]
+// 000101 0001 xxxx yyyy tttt -> swpb x, y, [t]
+// 000101 1000 dddd iiii iiii -> d = calloc(1, i * 8)
+// 000101 1000 xxxx 0000 0000 -> free(x); x = NULL
+// 000101 1001 dddd nnnn 0000 -> d = calloc(1, n)
 
 // Wide instructions are significantly more flexible and feel more like Thumb-2.
 // Similar to Thumb-2, it treats SP and PC differently than other registers, and
@@ -522,7 +562,8 @@ static void decode_wide_insn(tgolf_state *s, u32 insn)
         case 004:
             decode_wide_io(s, insn);
             break;
-        default: illegal(); // WIP
+        case 005:
+        default: illegal(insn); // WIP
     }
 }
 
@@ -535,13 +576,14 @@ static volatile sig_atomic_t handler_state = HANDLER_STATE_NORMAL;
 static volatile sig_atomic_t regs_buf[16];
 static volatile sig_atomic_t cpsr_buf;
 
-static void tgolf_parse(void)
+void tgolf_parse(void)
 {
     // We don't want to do everything with volatiles. That is dumb.
     // Make a convenient local copy in an easy to parse struct.
     tgolf_state s;
-    for (int i = 0; i < 16; i++)
+    for (int i = 0; i < 16; i++) {
         s.r[i] = (u32)regs_buf[i];
+    }
     s.cpsr.raw = (u32)cpsr_buf;
 
     u32 insn = *(u16 *)(s.r[REG_PC] & ~1);
@@ -560,7 +602,8 @@ static void tgolf_parse(void)
                 case MODE_REG_Z: {
                     u64 result = ((u64(*)(void))io_funcs[id].func)();
                     s.r[insn & 7] = (u32)result;
-                    s.cpsr.zero = (u32)(result >> 32);
+                    // set zero flag for success
+                    s.cpsr.zero = result >> 32;
                     break;
                 }
                 case MODE_OUTPUT_REG: {
@@ -572,7 +615,6 @@ static void tgolf_parse(void)
                     break;
                 }
             }
-            s.r[REG_PC] += 2;
             break;
         } case 0100: { // narrow arithmetic
             switch (insn & 0070) {
@@ -585,34 +627,28 @@ static void tgolf_parse(void)
                     s.cpsr.negative = 1;
                     s.cpsr.carry = 0;
                     s.cpsr.overflow = 0;
-                    s.r[REG_PC] += 2;
                     break;
                 }
                 case 0030: { // abs Rd
                     if ((s32)s.r[insn & 7] < 0) {
                         s.r[insn & 7] = -s.r[insn & 7];
                     }
-                    s.r[REG_PC] += 2;
                     break;
                 }
                 case 0040: { // udiv Rd, #10
                     s.r[insn & 7] /= 10;
-                    s.r[REG_PC] += 2;
                     break;
                 }
                 case 0050: { // umod Rd, #10
                     s.r[insn & 7] %= 10;
-                    s.r[REG_PC] += 2;
                     break;
                 }
                 case 0060: { // mul Rd, #10
                     s.r[insn & 7] *= 10;
-                    s.r[REG_PC] += 2;
                     break;
                 }
                 case 0070: { // rand Rd
                     s.r[insn & 7] = get_rand();
-                    s.r[REG_PC] += 2;
                     break;
                 }
             }
@@ -627,7 +663,6 @@ static void tgolf_parse(void)
             u32 tmp = *Mt;
             *Mt = s.r[Rd];
             s.r[Rd] = tmp;
-            s.r[REG_PC] += 2;
             break;
         }
         case 0300: { // swap register or wide instruction
@@ -640,23 +675,29 @@ static void tgolf_parse(void)
                 u32 tmp = s.r[Rn];
                 s.r[Rn] = s.r[Rm];
                 s.r[Rm] = tmp;
-                s.r[REG_PC] += 2;
             } else { // wide instruction
                 u32 insn2 = ((const u16 *)(s.r[REG_PC]&~1))[1];
                 u32 wide_insn = (((u32)insn & 077) << 16) | insn2;
                 decode_wide_insn(&s, wide_insn);
-                s.r[REG_PC] += 4;
+                s.r[REG_PC] += 2; // add on to the PC advance so we skip 4 bytes
             }
             break;
         }
     }
+    // Advance the PC.
+    // Note that for wide instructions, we added 2 beforehand.
+    s.r[REG_PC] += 2;
+
     // Restore the state
     for (int i = 0; i < 16; i++)
         regs_buf[i] = (sig_atomic_t)s.r[i];
+
     cpsr_buf = (sig_atomic_t)s.cpsr.raw;
-    // Update handler state
+
+    // Mark the handler state for stage 2.
     handler_state = HANDLER_STATE_RETURNING;
 }
+
 // The main entry point to the ThumbGolf runtime, triggered via sigaction.
 //
 // sigaction will pass the a snapshot of the processor, which we can modify.
@@ -667,10 +708,22 @@ static void thumbgolf_handler(int signo, siginfo_t *si, void *data)
     u32 *regs = &uc->uc_mcontext.arm_r0;
     arm_cpsr *cpsr = (arm_cpsr*)&uc->uc_mcontext.arm_cpsr;
     // only trap Thumb instructions
-    if (cpsr->thumb) {
-        u16 insn = *(const u16 *)(uc->uc_mcontext.arm_pc&~1);
-        if (cpsr->it_lo || cpsr->it_hi) {
-            die("ThumbGolf instructions are not supported in IT blocks (yet).\n");
+    if ((si->si_signo == SIGILL || si->si_signo == SIGTRAP) && cpsr->thumb) {
+        u16 insn = *(const u16 *)(regs[REG_PC] &~1);
+
+        // udf in IT blocks acts differently on hardware vs QEMU.
+        // On hardware, udf will always trap, but QEMU skips it on false conditions
+        // which is bad given how we encode wide instructions as a narrow instruction
+        // and a trail.
+        //
+        // Additionally, udf in an IT block is technically deprecated, so the
+        // inconsistency can only get worse.
+        //
+        // A possible workaround would be to require two IT cases for wide instructions,
+        // but that would be pretty confusing to use. You already need to manually
+        // encode the instruction.
+        if (cpsr->it_cond) {
+            die("ThumbGolf instructions are not supported in IT blocks.\n");
         }
         // udf.n: DExx
         // NOTE: Narrow instructions and wide opcodes are in octal, while
@@ -687,6 +740,7 @@ static void thumbgolf_handler(int signo, siginfo_t *si, void *data)
             // set a flag.
             //
             // The second time, we restore the registers and clear the flag.
+
             switch (handler_state) {
                 case HANDLER_STATE_NORMAL: {
                     handler_state = HANDLER_STATE_BUSY;
@@ -705,9 +759,8 @@ static void thumbgolf_handler(int signo, siginfo_t *si, void *data)
                     regs[REG_LR] = regs[REG_PC] | 1; // Thumb bit
 
                     // And jump to tgolf_parse by modifying the PC.
-                    // Note that despite being a Thumb function, we have to clear
-                    // the Thumb bit. It doesn't matter on hardware, but QEMU will,
-                    // for some reason, switch to ARM mode if the Thumb bit is set.
+                    // We must clear the Thumb bit. It doesn't make a difference on hardware
+                    // but it is against the spec and causes issues on QEMU.
                     regs[REG_PC] = (u32)(&tgolf_parse) & ~1;
                     break;
                 }
@@ -735,6 +788,7 @@ static void thumbgolf_handler(int signo, siginfo_t *si, void *data)
         // When xx == 0, exits the program.
         // Otherwise, does a "relative bl". Doesn't exchange instruction sets.
         } else if ((insn & 0xFF00) == 0xBE00) {
+            // Sign extend
             s32 offset = ((s32)(int8_t)insn) * 2;
             if (offset == 0) {
                 exit(0);
@@ -747,8 +801,11 @@ static void thumbgolf_handler(int signo, siginfo_t *si, void *data)
         // udiv: FBBx xxFx
         // TODO: IT blocks
         }  else if ((insn & 0xFFD0) == 0xFB90) {
-              u32 insn2 = ((const u16 *)(uc->uc_mcontext.arm_pc&~1))[1];
+              u32 insn2 = ((const u16 *)(uc->uc_mcontext.arm_pc & ~1))[1];
               if ((insn2 & 0x00F0) == 0x00F0) {
+                  if (cpsr->it_cond) {
+                      die("Division emulation in IT blocks is currently not supported.");
+                  }
                   // To be ABSOLUTELY safe, forcibly call libgcc.
                   // The last thing we want is an infinite loop.
                   if (insn & 0x0020) { // udiv
@@ -765,10 +822,10 @@ static void thumbgolf_handler(int signo, siginfo_t *si, void *data)
                   regs[REG_PC] += 4;
                   return;
               } else {
-                  illegal();
+                  illegal((insn2 << 16) | insn);
               }
         } else {
-            illegal();
+            illegal(insn);
         }
         // TODO: udf.w? That is only 12 real bits, while udf.n followed by an
         // arbitrary halfword is MUCH better.
@@ -795,8 +852,8 @@ static void thumbgolf_inject(void)
     setvbuf(stderr, NULL, _IONBF, 0);
 
     // Set up the signal handler
-    struct sigaction sa, osa;
-    sa.sa_flags = SA_ONSTACK | SA_RESTART | SA_NODEFER | SA_SIGINFO;
+    struct sigaction sa = {0}, osa = {0};
+    sa.sa_flags =  SA_ONSTACK | SA_RESTART | SA_NODEFER | SA_SIGINFO;
     sa.sa_sigaction = thumbgolf_handler;
     sigaction(SIGILL, &sa, &osa);
     sigaction(SIGTRAP, &sa, &osa);
